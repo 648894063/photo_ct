@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>学籍照片采集系统</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/file-saver/dist/FileSaver.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; background: #333; color: white; }
+        /* 顶部控制台 */
+        .controls { padding: 10px; background: #222; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between;}
+        select, button, input[type="file"] { padding: 8px; font-size: 14px; border-radius: 4px; border: none; }
+        button { background: #007bff; color: white; cursor: pointer; }
+        button:active { background: #0056b3; }
+        .danger { background: #dc3545; }
+        /* 摄像头区域 */
+        .camera-container { flex: 1; position: relative; display: flex; justify-content: center; align-items: center; overflow: hidden; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        .capture-btn { position: absolute; bottom: 20px; width: 60px; height: 60px; border-radius: 50%; background: white; border: 4px solid #aaa; cursor: pointer; }
+        /* 底部学生列表 (横向滑动) */
+        .student-list-container { height: 80px; background: #111; display: flex; overflow-x: auto; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; padding: 10px; align-items: center; }
+        .student-item { flex: 0 0 auto; width: 80px; padding: 10px; margin-right: 10px; background: #444; text-align: center; border-radius: 8px; cursor: pointer; border: 2px solid transparent; }
+        .student-item.active { border-color: #007bff; background: #555; }
+        .student-item.has-photo { background: #28a745; }
+        .student-item .name { font-size: 16px; font-weight: bold; }
+        /* 照片预览弹窗 */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 1000; flex-direction: column; justify-content: center; align-items: center; }
+        .modal img { max-width: 90%; max-height: 70%; border-radius: 8px; }
+        .modal-controls { margin-top: 20px; display: flex; gap: 20px; }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <input type="file" id="excelFile" accept=".xlsx, .xls, .csv" title="导入学生名单">
+        <select id="classSelect"><option value="">请选择班级</option></select>
+        <select id="photoSize">
+            <option value="1">原图大小</option>
+            <option value="0.5">压缩 50%</option>
+            <option value="0.2">压缩 20% (学籍系统常用)</option>
+        </select>
+        <button onclick="exportZip()">打包下载ZIP</button>
+        <button class="danger" onclick="clearAll()">初始化数据</button>
+    </div>
+
+    <div class="camera-container">
+        <video id="video" autoplay playsinline></video>
+        <div class="capture-btn" onclick="takePhoto()"></div>
+    </div>
+
+    <div class="student-list-container" id="studentList">
+        <div style="color:#aaa; font-size: 12px; margin: auto;">请先导入包含"班级","姓名","照片名"的Excel</div>
+    </div>
+
+    <div class="modal" id="previewModal">
+        <img id="previewImg" src="" alt="预览照片">
+        <div class="modal-controls">
+            <button onclick="closePreview()">关闭放大</button>
+            <button class="danger" onclick="deleteCurrentPhoto()">删除重拍</button>
+        </div>
+    </div>
+
+    <script>
+        let studentsData = []; 
+        let currentStudentIndex = -1;
+        const video = document.getElementById('video');
+        
+        // 1. 初始化摄像头 (优先调用后置摄像头)
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment' } 
+                });
+                video.srcObject = stream;
+            } catch (err) {
+                alert("无法访问摄像头，请确保在HTTPS环境下运行并授予权限：" + err);
+            }
+        }
+        initCamera();
+
+        // 2. 读取 Excel 并解析
+        document.getElementById('excelFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const data = new Uint8Array(e.target.result);
+                const workbook = XLSX.read(data, {type: 'array'});
+                const firstSheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[firstSheetName];
+                const json = XLSX.utils.sheet_to_json(worksheet);
+                
+                studentsData = json.map(row => ({
+                    class: row['班级'],
+                    name: row['姓名'],
+                    photoName: row['照片名'], // 例如: 3508022010xxxxxx_张三.jpg
+                    photoData: null // 存放Base64照片数据
+                })).filter(s => s.name && s.class);
+
+                populateClassDropdown();
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        // 3. 填充班级下拉菜单
+        function populateClassDropdown() {
+            const classes = [...new Set(studentsData.map(s => s.class))];
+            const select = document.getElementById('classSelect');
+            select.innerHTML = '<option value="">请选择班级</option>';
+            classes.forEach(c => {
+                select.innerHTML += `<option value="${c}">${c}</option>`;
+            });
+            select.addEventListener('change', renderStudentList);
+        }
+
+        // 4. 渲染底部学生列表
+        function renderStudentList() {
+            const selectedClass = document.getElementById('classSelect').value;
+            const container = document.getElementById('studentList');
+            container.innerHTML = '';
+            currentStudentIndex = -1;
+
+            if(!selectedClass) return;
+
+            studentsData.forEach((student, index) => {
+                if(student.class == selectedClass) {
+                    const div = document.createElement('div');
+                    div.className = `student-item ${student.photoData ? 'has-photo' : ''}`;
+                    div.innerHTML = `<div class="name">${student.name}</div>`;
+                    
+                    div.onclick = () => {
+                        // 如果已经有照片，点击则放大预览
+                        if (student.photoData) {
+                            showPreview(index);
+                        } else {
+                            // 否则选中该学生准备拍照
+                            document.querySelectorAll('.student-item').forEach(el => el.classList.remove('active'));
+                            div.classList.add('active');
+                            currentStudentIndex = index;
+                        }
+                    };
+                    container.appendChild(div);
+                }
+            });
+        }
+
+        // 5. 拍照逻辑
+        function takePhoto() {
+            if (currentStudentIndex === -1) {
+                alert("请先在下方列表中点击选择一个要拍照的学生！");
+                return;
+            }
+
+            const scale = parseFloat(document.getElementById('photoSize').value);
+            const canvas = document.createElement('canvas');
+            // 按比例缩放照片
+            canvas.width = video.videoWidth * scale;
+            canvas.height = video.videoHeight * scale;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // 获取JPEG格式数据，指定质量 0.8
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+            studentsData[currentStudentIndex].photoData = dataUrl;
+            
+            // 刷新列表显示绿色状态
+            renderStudentList(); 
+        }
+
+        // 6. 预览与删除
+        function showPreview(index) {
+            currentStudentIndex = index;
+            const modal = document.getElementById('previewModal');
+            document.getElementById('previewImg').src = studentsData[index].photoData;
+            modal.style.display = 'flex';
+        }
+
+        function closePreview() {
+            document.getElementById('previewModal').style.display = 'none';
+            currentStudentIndex = -1;
+            renderStudentList();
+        }
+
+        function deleteCurrentPhoto() {
+            if(confirm("确定要删除该学生的照片重新拍吗？")) {
+                studentsData[currentStudentIndex].photoData = null;
+                closePreview();
+            }
+        }
+
+        // 7. 打包ZIP下载
+        function exportZip() {
+            const zip = new JSZip();
+            let count = 0;
+            studentsData.forEach(student => {
+                if(student.photoData) {
+                    // 去除 Base64 前缀
+                    const base64Data = student.photoData.split(',')[1];
+                    // 确保文件名带有后缀
+                    const fileName = student.photoName.includes('.') ? student.photoName : `${student.photoName}.jpg`;
+                    // 按班级建文件夹
+                    zip.folder(student.class).file(fileName, base64Data, {base64: true});
+                    count++;
+                }
+            });
+
+            if(count === 0) {
+                alert("还没有拍摄任何照片！");
+                return;
+            }
+
+            zip.generateAsync({type:"blob"}).then(function(content) {
+                saveAs(content, "学生学籍照片.zip");
+            });
+        }
+
+        // 8. 一键初始化
+        function clearAll() {
+            if(confirm("警告：此操作将清空当前所有数据和已拍照片！确定继续吗？")) {
+                studentsData = [];
+                document.getElementById('excelFile').value = '';
+                document.getElementById('classSelect').innerHTML = '<option value="">请选择班级</option>';
+                document.getElementById('studentList').innerHTML = '<div style="color:#aaa; font-size: 12px; margin: auto;">数据已清空，请重新导入Excel</div>';
+            }
+        }
+    </script>
+</body>
+</html>
