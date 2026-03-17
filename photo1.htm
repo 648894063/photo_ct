@@ -145,7 +145,6 @@
 
         // 点击画面显示对焦框动效
         cameraContainer.addEventListener('click', function(e) {
-            // 防止点击拍照按钮时触发对焦框
             if(e.target.classList.contains('capture-btn')) return;
 
             const rect = cameraContainer.getBoundingClientRect();
@@ -155,12 +154,10 @@
             focusRing.style.left = x + 'px';
             focusRing.style.top = y + 'px';
             
-            // 重新触发CSS动画
             focusRing.classList.remove('active');
             void focusRing.offsetWidth; 
             focusRing.classList.add('active');
 
-            // 1秒后隐藏框
             setTimeout(() => { focusRing.classList.remove('active'); }, 1000);
         });
 
@@ -325,7 +322,6 @@
             
             let targetW, targetH, cropX, cropY, cropW, cropH;
 
-            // 计算居中等比裁剪区域
             if (sizeMode === '168x240') {
                 targetW = 168;
                 targetH = 240;
@@ -351,17 +347,18 @@
             canvas.width = targetW;
             canvas.height = targetH;
             
-            // 绘制画面
             ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
 
-            // ================= 核心代码：绘制水印 (已删除) =================
-            
-            // ======================================================
+            //const fontSize = Math.max(12, Math.floor(targetW * 0.05)); 
+            //ctx.font = `bold ${fontSize}px sans-serif`;
+            //ctx.fillStyle = "rgba(255, 255, 255, 0.7)"; 
+            //ctx.shadowColor = "rgba(0, 0, 0, 0.6)"; ctx.shadowBlur = 3;
+            //ctx.textAlign = "right"; ctx.textBaseline = "bottom";
+            //ctx.fillText("去水印请微信qq648894063", targetW - 5, targetH - 5);
 
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-            
-            // 动态压缩算法保证文件体积达标
             let quality = 0.9;
+            let dataUrl = canvas.toDataURL('image/jpeg', quality);
+            
             if (sizeLimitKB > 0) {
                 const maxBytes = sizeLimitKB * 1024;
                 while (dataUrl.length * 0.75 > maxBytes && quality > 0.1) {
@@ -370,13 +367,10 @@
                 }
             }
             
-            // 强制植入 300 DPI 元数据
             dataUrl = setDpiTo300(dataUrl);
 
             studentsData[currentStudentIndex].photoData = dataUrl;
-            localforage.setItem(String(studentsData[currentStudentIndex].photoName), dataUrl).catch(err => {
-                console.error("照片缓存保存失败", err);
-            });
+            localforage.setItem(String(studentsData[currentStudentIndex].photoName), dataUrl);
             
             const selectedClass = document.getElementById('classSelect').value;
             let nextIndex = -1;
@@ -386,11 +380,10 @@
                 }
             }
             currentStudentIndex = nextIndex !== -1 ? nextIndex : -1; 
-            
             renderStudentList(); 
         }
 
-        // 预览及删除逻辑
+        // 预览及删除
         function showPreview(index) {
             currentStudentIndex = index;
             document.getElementById('previewImg').src = studentsData[index].photoData;
@@ -407,7 +400,7 @@
             renderStudentList();
         }
 
-        // 导出 ZIP
+        // 核心更新：导出 ZIP 后弹出提示框
         function exportZip() {
             const zip = new JSZip();
             let count = 0;
@@ -425,6 +418,7 @@
                 return; 
             }
             
+            // 改变导出按钮状态，防止重复点击
             const btn = document.querySelector('button[onclick="exportZip()"]');
             const originalText = btn.innerText;
             btn.innerText = "正在打包...";
@@ -433,9 +427,11 @@
             zip.generateAsync({type:"blob"}).then(content => {
                 saveAs(content, "学生学籍照片.zip");
                 
+                // 恢复按钮状态
                 btn.innerText = originalText;
                 btn.disabled = false;
 
+                // 延迟 500 毫秒弹出成功提示框，确保浏览器已触发下载指令
                 setTimeout(() => {
                     document.getElementById('successModal').style.display = 'flex';
                 }, 500);
