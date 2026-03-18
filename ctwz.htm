@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>学籍照片采集系统</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/file-saver/dist/FileSaver.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/localforage/dist/localforage.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; background: #333; color: white; }
+        
+        /* 顶部控制台 */
+        .controls { padding: 10px; background: #222; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-start;}
+        select, button, input[type="file"] { padding: 8px; font-size: 13px; border-radius: 4px; border: none; }
+        button { background: #007bff; color: white; cursor: pointer; }
+        button:active { background: #0056b3; }
+        .danger { background: #dc3545; }
+        
+        /* 摄像头区域 */
+        .camera-container { flex: 1; position: relative; display: flex; justify-content: center; align-items: center; overflow: hidden; background: #000; }
+        video { width: 100%; height: 100%; object-fit: cover; z-index: 1; }
+        
+        /* 人形轮廓 SVG 蒙版 */
+        .silhouette-guide { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
+        
+        /* 拍照按钮 */
+        .capture-btn { position: absolute; bottom: 20px; width: 60px; height: 60px; border-radius: 50%; background: white; border: 4px solid #aaa; cursor: pointer; z-index: 10; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        .capture-btn:active { background: #ddd; transform: scale(0.95); }
+
+        /* 对焦框动效 */
+        .focus-ring {
+            position: absolute;
+            width: 60px; height: 60px;
+            border: 2px solid #00ff00;
+            border-radius: 8px;
+            z-index: 8;
+            pointer-events: none;
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(1.5);
+            transition: all 0.2s ease-out;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+        }
+        .focus-ring.active {
+            opacity: 1;
+            transform: translate(-50%, -50%) scale(1);
+        }
+        
+        /* 底部滑动学生列表 */
+        .student-list-container { height: 140px; background: #111; display: flex; overflow-x: auto; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; padding: 10px; align-items: center; gap: 12px; }
+        
+        /* 单个学生卡片 */
+        .student-item { flex: 0 0 auto; width: 80px; height: 110px; background: #333; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 6px; border-radius: 8px; cursor: pointer; border: 2px solid transparent; transition: all 0.2s; }
+        .student-item.active { border-color: #007bff; background: #444; transform: scale(1.05); }
+        .student-item .thumb-box { width: 68px; height: 80px; background: #555; border-radius: 4px; display: flex; justify-content: center; align-items: center; overflow: hidden; }
+        .student-item .thumb-box img { width: 100%; height: 100%; object-fit: cover; }
+        .student-item .thumb-box .placeholder { color: #999; font-size: 12px; }
+        .student-item .name { font-size: 14px; color: #eee; width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; }
+
+        /* 模态弹窗基础样式 */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 1000; flex-direction: column; justify-content: center; align-items: center; }
+        
+        /* 照片预览专用 */
+        .modal img { max-width: 90%; max-height: 70%; border-radius: 8px; }
+        .modal-controls { margin-top: 20px; display: flex; gap: 20px; }
+        .modal-controls button { padding: 10px 30px; font-size: 16px; } 
+
+        /* 保存成功提示框专用 */
+        .success-box { background: #222; padding: 25px; border-radius: 12px; text-align: center; max-width: 80%; border: 1px solid #4caf50; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }
+        .success-box h3 { color: #4caf50; margin-top: 0; font-size: 20px; }
+        .success-box p { font-size: 14px; color: #ccc; line-height: 1.6; text-align: left; margin: 15px 0; }
+        .success-box .highlight { color: #fff; font-weight: bold; background: #444; padding: 2px 6px; border-radius: 4px; }
+        .success-box button { width: 100%; padding: 12px; font-size: 16px; margin-top: 10px; border-radius: 6px; }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <input type="file" id="excelFile" accept=".xlsx, .xls, .csv" title="导入名单" style="width: 90px;">
+        <select id="classSelect"><option value="">请选择班级</option></select>
+        
+        <select id="photoSize">
+            <option value="168x240">学籍照 (168×240)</option>
+            <option value="origin">原图自适应</option>
+        </select>
+        
+        <select id="fileSizeLimit">
+            <option value="40">限制 < 40KB</option>
+            <option value="20">限制 < 20KB</option>
+            <option value="0">不限大小</option>
+        </select>
+
+        <button onclick="exportZip()">打包ZIP</button>
+        <button class="danger" onclick="clearAll()">初始化</button>
+    </div>
+
+    <div class="camera-container" id="cameraContainer">
+        <video id="video" autoplay playsinline></video>
+        
+        <div class="focus-ring" id="focusRing"></div>
+
+        <svg class="silhouette-guide" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
+            <ellipse cx="50" cy="30" rx="15" ry="20" stroke="rgba(255, 255, 255, 0.4)" stroke-width="1.5" fill="none" />
+            <path d="M 35 55 Q 50 45 65 55 L 65 95 H 35 Z" stroke="rgba(255, 255, 255, 0.4)" stroke-width="1.5" fill="none" />
+        </svg>
+
+        <div class="capture-btn" onclick="takePhoto()"></div>
+    </div>
+
+    <div class="student-list-container" id="studentList">
+        <div style="color:#aaa; font-size: 12px; margin: auto;">正在检查本地名单数据...</div>
+    </div>
+
+    <div class="modal" id="previewModal">
+        <img id="previewImg" src="" alt="预览照片">
+        <div class="modal-controls">
+            <button onclick="closePreview()">关闭</button>
+            <button class="danger" onclick="deleteCurrentPhoto()">删除</button>
+        </div>
+    </div>
+
+    <div class="modal" id="successModal">
+        <div class="success-box">
+            <h3>✅ 打包下载已触发！</h3>
+            <p>
+                <b>苹果手机寻找文件教程：</b><br>
+                照片<span style="color:#ff6b6b">不会</span>保存在相册中。请退回手机桌面，找到系统自带的蓝色的 <span class="highlight">文件夹</span> App。<br><br>
+                依次点击：<br>
+                <span class="highlight">浏览</span> ➔ <span class="highlight">我的 iPhone</span> ➔ <span class="highlight">下载</span><br><br>
+                即可看到名为 <b>学生学籍照片.zip</b> 的压缩包，长按可分享发送至微信或QQ。
+            </p>
+            <button onclick="document.getElementById('successModal').style.display='none'">我知道了</button>
+        </div>
+    </div>
+
+    <script>
+        let studentsData = []; 
+        let currentStudentIndex = -1;
+        const video = document.getElementById('video');
+        const cameraContainer = document.getElementById('cameraContainer');
+        const focusRing = document.getElementById('focusRing');
+        
+        localforage.config({ name: 'StudentPhotoApp', storeName: 'photos' });
+
+        // 点击画面显示对焦框动效
+        cameraContainer.addEventListener('click', function(e) {
+            if(e.target.classList.contains('capture-btn')) return;
+
+            const rect = cameraContainer.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            focusRing.style.left = x + 'px';
+            focusRing.style.top = y + 'px';
+            
+            focusRing.classList.remove('active');
+            void focusRing.offsetWidth; 
+            focusRing.classList.add('active');
+
+            setTimeout(() => { focusRing.classList.remove('active'); }, 1000);
+        });
+
+        // 页面加载及初始化
+        window.addEventListener('DOMContentLoaded', async () => {
+            initCamera();
+            try {
+                const savedMetadata = await localforage.getItem('studentsMetadata');
+                if (savedMetadata && savedMetadata.length > 0) {
+                    studentsData = savedMetadata.map(s => ({ class: s.class, name: s.name, photoName: s.photoName, photoData: null }));
+                    await loadPhotosAndRender();
+                } else {
+                    document.getElementById('studentList').innerHTML = '<div style="color:#aaa; font-size: 12px; margin: auto;">请先导入名单 Excel</div>';
+                }
+            } catch (err) {
+                document.getElementById('studentList').innerHTML = '<div style="color:#aaa; font-size: 12px; margin: auto;">请先导入名单 Excel</div>';
+            }
+        });
+
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                video.srcObject = stream;
+            } catch (err) {
+                alert("无法访问摄像头：" + err);
+            }
+        }
+
+        // 读取 Excel
+        document.getElementById('excelFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            document.getElementById('studentList').innerHTML = '<div style="color:#aaa; font-size: 14px; margin: auto;">正在解析...</div>';
+            
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    const json = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+                    
+                    studentsData = json.map(row => ({
+                        class: row['班级'] !== undefined ? String(row['班级']) : '',
+                        name: row['姓名'] !== undefined ? String(row['姓名']) : '',
+                        photoName: row['照片名'] !== undefined ? String(row['照片名']) : '', 
+                        photoData: null 
+                    })).filter(s => s.name && s.class);
+
+                    const metadataToSave = studentsData.map(s => ({ class: s.class, name: s.name, photoName: s.photoName }));
+                    await localforage.setItem('studentsMetadata', metadataToSave);
+                    await loadPhotosAndRender();
+                } catch (error) {
+                    alert("格式错误！\n" + error);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        async function loadPhotosAndRender() {
+            populateClassDropdown();
+            await Promise.all(studentsData.map(async (student) => {
+                try {
+                    const savedPhoto = await localforage.getItem(student.photoName);
+                    if (savedPhoto) student.photoData = savedPhoto;
+                } catch (err) {}
+            }));
+            renderStudentList();
+        }
+
+        function populateClassDropdown() {
+            const classes = [...new Set(studentsData.map(s => s.class))];
+            const select = document.getElementById('classSelect');
+            select.innerHTML = '<option value="">请选择班级</option>';
+            classes.forEach(c => select.innerHTML += `<option value="${c}">${c}</option>`);
+            
+            select.addEventListener('change', () => {
+                currentStudentIndex = -1; 
+                const selectedClass = select.value;
+                if (selectedClass) {
+                    for(let i = 0; i < studentsData.length; i++) {
+                        if(studentsData[i].class === selectedClass && !studentsData[i].photoData) {
+                            currentStudentIndex = i; break;
+                        }
+                    }
+                }
+                renderStudentList();
+            });
+        }
+
+        function renderStudentList() {
+            const selectedClass = document.getElementById('classSelect').value;
+            const container = document.getElementById('studentList');
+            const currentScroll = container.scrollLeft; 
+            if(!selectedClass) return; 
+            
+            container.innerHTML = '';
+            studentsData.forEach((student, index) => {
+                if(student.class == selectedClass) {
+                    const div = document.createElement('div');
+                    div.className = `student-item`;
+                    if (currentStudentIndex === index) {
+                        div.classList.add('active');
+                        setTimeout(() => div.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' }), 50);
+                    }
+                    let thumbHTML = student.photoData ? `<img src="${student.photoData}">` : `<div class="placeholder">未拍</div>`;
+                    div.innerHTML = `<div class="thumb-box">${thumbHTML}</div><div class="name">${student.name}</div>`;
+                    
+                    div.onclick = () => {
+                        if (student.photoData) showPreview(index); 
+                        else {
+                            document.querySelectorAll('.student-item').forEach(el => el.classList.remove('active'));
+                            div.classList.add('active');
+                            currentStudentIndex = index;
+                        }
+                    };
+                    container.appendChild(div);
+                }
+            });
+            if(currentStudentIndex === -1) container.scrollLeft = currentScroll;
+        }
+
+        // 修改 JPEG 二进制头部数据强制植入 300DPI
+        function setDpiTo300(base64) {
+            const data = base64.split(',');
+            const bstr = atob(data[1]);
+            const n = bstr.length;
+            const u8arr = new Uint8Array(n);
+            for (let i = 0; i < n; i++) {
+                u8arr[i] = bstr.charCodeAt(i);
+            }
+            
+            if (u8arr[0] === 0xFF && u8arr[1] === 0xD8 && u8arr[2] === 0xFF && u8arr[3] === 0xE0) {
+                u8arr[13] = 1;          
+                const dpi = 300;        
+                u8arr[14] = dpi >> 8;   
+                u8arr[15] = dpi & 0xFF; 
+                u8arr[16] = dpi >> 8;   
+                u8arr[17] = dpi & 0xFF; 
+            }
+            
+            let binary = '';
+            const chunkSize = 8192; 
+            for (let i = 0; i < u8arr.length; i += chunkSize) {
+                binary += String.fromCharCode.apply(null, u8arr.subarray(i, i + chunkSize));
+            }
+            return data[0] + ',' + btoa(binary);
+        }
+
+        // 拍照、智能裁剪与动态压缩
+        function takePhoto() {
+            if (currentStudentIndex === -1) {
+                alert("请先选择一个要拍照的学生！"); return;
+            }
+
+            const sizeMode = document.getElementById('photoSize').value;
+            const sizeLimitKB = parseInt(document.getElementById('fileSizeLimit').value);
+            
+            const vidW = video.videoWidth;
+            const vidH = video.videoHeight;
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            let targetW, targetH, cropX, cropY, cropW, cropH;
+
+            if (sizeMode === '168x240') {
+                targetW = 168;
+                targetH = 240;
+                const targetRatio = targetW / targetH;
+                const vidRatio = vidW / vidH;
+
+                if (vidRatio > targetRatio) {
+                    cropH = vidH;
+                    cropW = vidH * targetRatio;
+                    cropX = (vidW - cropW) / 2;
+                    cropY = 0;
+                } else {
+                    cropW = vidW;
+                    cropH = vidW / targetRatio;
+                    cropX = 0;
+                    cropY = (vidH - cropH) / 2;
+                }
+            } else {
+                targetW = vidW; targetH = vidH;
+                cropX = 0; cropY = 0; cropW = vidW; cropH = vidH;
+            }
+
+            canvas.width = targetW;
+            canvas.height = targetH;
+            
+            ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+
+            //const fontSize = Math.max(12, Math.floor(targetW * 0.05)); 
+            //ctx.font = `bold ${fontSize}px sans-serif`;
+            //ctx.fillStyle = "rgba(255, 255, 255, 0.7)"; 
+            //ctx.shadowColor = "rgba(0, 0, 0, 0.6)"; ctx.shadowBlur = 3;
+            //ctx.textAlign = "right"; ctx.textBaseline = "bottom";
+            //ctx.fillText("去水印请微信qq648894063", targetW - 5, targetH - 5);
+
+            let quality = 0.9;
+            let dataUrl = canvas.toDataURL('image/jpeg', quality);
+            
+            if (sizeLimitKB > 0) {
+                const maxBytes = sizeLimitKB * 1024;
+                while (dataUrl.length * 0.75 > maxBytes && quality > 0.1) {
+                    quality -= 0.1;
+                    dataUrl = canvas.toDataURL('image/jpeg', quality);
+                }
+            }
+            
+            dataUrl = setDpiTo300(dataUrl);
+
+            studentsData[currentStudentIndex].photoData = dataUrl;
+            localforage.setItem(String(studentsData[currentStudentIndex].photoName), dataUrl);
+            
+            const selectedClass = document.getElementById('classSelect').value;
+            let nextIndex = -1;
+            for(let i = currentStudentIndex + 1; i < studentsData.length; i++) {
+                if(studentsData[i].class === selectedClass && !studentsData[i].photoData) {
+                    nextIndex = i; break;
+                }
+            }
+            currentStudentIndex = nextIndex !== -1 ? nextIndex : -1; 
+            renderStudentList(); 
+        }
+
+        // 预览及删除
+        function showPreview(index) {
+            currentStudentIndex = index;
+            document.getElementById('previewImg').src = studentsData[index].photoData;
+            document.getElementById('previewModal').style.display = 'flex';
+        }
+        function closePreview() {
+            document.getElementById('previewModal').style.display = 'none';
+            currentStudentIndex = -1; renderStudentList();
+        }
+        function deleteCurrentPhoto() {
+            localforage.removeItem(String(studentsData[currentStudentIndex].photoName));
+            studentsData[currentStudentIndex].photoData = null; 
+            document.getElementById('previewModal').style.display = 'none';
+            renderStudentList();
+        }
+
+        // 核心更新：导出 ZIP 后弹出提示框
+        function exportZip() {
+            const zip = new JSZip();
+            let count = 0;
+            studentsData.forEach(s => {
+                if(s.photoData) {
+                    const b64 = s.photoData.split(',')[1];
+                    const fname = s.photoName.includes('.') ? s.photoName : `${s.photoName}.jpg`;
+                    zip.folder(s.class).file(fname, b64, {base64: true});
+                    count++;
+                }
+            });
+            
+            if(count === 0) { 
+                alert("还没有拍摄任何照片！"); 
+                return; 
+            }
+            
+            // 改变导出按钮状态，防止重复点击
+            const btn = document.querySelector('button[onclick="exportZip()"]');
+            const originalText = btn.innerText;
+            btn.innerText = "正在打包...";
+            btn.disabled = true;
+
+            zip.generateAsync({type:"blob"}).then(content => {
+                saveAs(content, "学生学籍照片.zip");
+                
+                // 恢复按钮状态
+                btn.innerText = originalText;
+                btn.disabled = false;
+
+                // 延迟 500 毫秒弹出成功提示框，确保浏览器已触发下载指令
+                setTimeout(() => {
+                    document.getElementById('successModal').style.display = 'flex';
+                }, 500);
+            });
+        }
+
+        function clearAll() {
+            if(confirm("确定清空当前所有名单和已拍照片（包括本地缓存）吗？")) {
+                localforage.clear().then(() => {
+                    studentsData = [];
+                    document.getElementById('excelFile').value = '';
+                    document.getElementById('classSelect').innerHTML = '<option value="">请选择班级</option>';
+                    document.getElementById('studentList').innerHTML = '<div style="color:#aaa; font-size: 12px; margin: auto;">数据已彻底清空，请重新导入Excel</div>';
+                    alert("已完全初始化！");
+                });
+            }
+        }
+    </script>
+</body>
+</html>
